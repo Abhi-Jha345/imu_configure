@@ -1,0 +1,23 @@
+# CMake build output
+build/
+*/build/
+**/build/
+
+# Compiled objects / binaries
+*.o
+*.a
+*.so
+*.exe
+*.out
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
