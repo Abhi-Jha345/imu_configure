@@ -1,14 +1,13 @@
 /*!
  * \file    main.c
- * \brief   Interactive connect + full configuration tool for the SBG Ellipse-D (dual-antenna GNSS/INS).
+ * \brief   Interactive connect + COMPLETE configuration tool for the SBG Ellipse-D.
  *
  * Built entirely on the binary sbgECom command API (no extra libraries).
+ * The Ellipse-D belongs to the ELLIPSE series, configured through sbgEComCmd*
+ * binary commands (NOT the REST API used by Ekinox/Apogee/Quanta).
  *
  * Usage:   ellipse-d-config <SERIAL_DEVICE> <BAUDRATE>
  * Example: ellipse-d-config /dev/ttyUSB0 921600
- *
- * The Ellipse-D belongs to the ELLIPSE series, so it is configured through the
- * sbgEComCmd* binary commands (NOT the REST API used by Ekinox/Apogee/Quanta).
  */
 
 #include <signal.h>
@@ -18,368 +17,428 @@
 #include <sbgEComLib.h>
 
 //======================================================================//
-//  Small console input helpers                                         //
+//  Console input helpers                                               //
 //======================================================================//
 
-static void flushLine(void)
+static void flushLine(void) { int c; while ((c = getchar()) != '\n' && c != EOF) {} }
+
+static int promptInt(const char *label, int def)
 {
-    int c;
-    while ((c = getchar()) != '\n' && c != EOF) { }
+    char b[80];
+    printf("%s [%d]: ", label, def);
+    if (fgets(b, sizeof(b), stdin) && b[0] != '\n') return atoi(b);
+    return def;
 }
-
-static int promptInt(const char *label, int defValue)
+static float promptFloat(const char *label, float def)
 {
-    char buffer[64];
-
-    printf("%s [%d]: ", label, defValue);
-    if (fgets(buffer, sizeof(buffer), stdin) && (buffer[0] != '\n'))
+    char b[80];
+    printf("%s [%.4f]: ", label, def);
+    if (fgets(b, sizeof(b), stdin) && b[0] != '\n') return (float)atof(b);
+    return def;
+}
+static double promptDouble(const char *label, double def)
+{
+    char b[80];
+    printf("%s [%.7f]: ", label, def);
+    if (fgets(b, sizeof(b), stdin) && b[0] != '\n') return atof(b);
+    return def;
+}
+static void promptStr(const char *label, const char *def, char *out, size_t n)
+{
+    char b[80];
+    printf("%s [%s]: ", label, def);
+    if (fgets(b, sizeof(b), stdin) && b[0] != '\n')
     {
-        return atoi(buffer);
+        b[strcspn(b, "\r\n")] = '\0';
+        snprintf(out, n, "%s", b);
     }
-    return defValue;
+    else snprintf(out, n, "%s", def);
 }
-
-static float promptFloat(const char *label, float defValue)
-{
-    char buffer[64];
-
-    printf("%s [%.4f]: ", label, defValue);
-    if (fgets(buffer, sizeof(buffer), stdin) && (buffer[0] != '\n'))
-    {
-        return (float)atof(buffer);
-    }
-    return defValue;
-}
+static void result(SbgErrorCode e) { printf(e == SBG_NO_ERROR ? "  -> OK\n" : "  -> FAILED (%d)\n", e); }
 
 //======================================================================//
-//  Live data callback (used by the monitor menu entry)                 //
+//  Live monitor                                                        //
 //======================================================================//
 
-static volatile sig_atomic_t   gStopMonitor = 0;
+static volatile sig_atomic_t gStop = 0;
+static void onSigInt(int s) { SBG_UNUSED_PARAMETER(s); gStop = 1; }
 
-static void onSigInt(int sig)
+static SbgErrorCode onLog(SbgEComHandle *h, SbgEComClass cls, SbgEComMsgId msg,
+                          const SbgEComLogUnion *p, void *u)
 {
-    SBG_UNUSED_PARAMETER(sig);
-    gStopMonitor = 1;
-}
-
-static SbgErrorCode onLogReceived(SbgEComHandle *pHandle, SbgEComClass msgClass,
-                                  SbgEComMsgId msg, const SbgEComLogUnion *pLogData, void *pUserArg)
-{
-    SBG_UNUSED_PARAMETER(pHandle);
-    SBG_UNUSED_PARAMETER(pUserArg);
-
-    if (msgClass != SBG_ECOM_CLASS_LOG_ECOM_0)
-    {
-        return SBG_NO_ERROR;
-    }
-
+    SBG_UNUSED_PARAMETER(h); SBG_UNUSED_PARAMETER(u);
+    if (cls != SBG_ECOM_CLASS_LOG_ECOM_0) return SBG_NO_ERROR;
     switch (msg)
     {
     case SBG_ECOM_LOG_EKF_EULER:
-        printf("EULER  r/p/y[deg]: % 7.2f % 7.2f % 7.2f\n",
-               sbgRadToDegf(pLogData->ekfEulerData.euler[0]),
-               sbgRadToDegf(pLogData->ekfEulerData.euler[1]),
-               sbgRadToDegf(pLogData->ekfEulerData.euler[2]));
-        break;
-
-    case SBG_ECOM_LOG_EKF_NAV:
-        printf("NAV    lat/lon/alt: % 11.7f % 11.7f % 8.2f   solution=0x%08x\n",
-               pLogData->ekfNavData.position[0],
-               pLogData->ekfNavData.position[1],
-               pLogData->ekfNavData.position[2],
-               pLogData->ekfNavData.status);
-        break;
-
+        printf("EULER r/p/y: %7.2f %7.2f %7.2f\n",
+               sbgRadToDegf(p->ekfEulerData.euler[0]), sbgRadToDegf(p->ekfEulerData.euler[1]),
+               sbgRadToDegf(p->ekfEulerData.euler[2])); break;
     case SBG_ECOM_LOG_GPS1_HDT:
-        printf("GPS HDT heading/pitch[deg]: % 7.2f % 7.2f   (dual antenna)\n",
-               pLogData->gpsHdtData.heading, pLogData->gpsHdtData.pitch);
-        break;
-
-    case SBG_ECOM_LOG_IMU_DATA:
-        printf("IMU    accel[m/s2]: % 7.3f % 7.3f % 7.3f\n",
-               pLogData->imuData.accelerometers[0],
-               pLogData->imuData.accelerometers[1],
-               pLogData->imuData.accelerometers[2]);
-        break;
-
-    default:
-        break;
+        printf("GPS HDT heading: %7.2f  pitch: %6.2f\n", p->gpsHdtData.heading, p->gpsHdtData.pitch); break;
+    default: break;
     }
-
     return SBG_NO_ERROR;
 }
 
 //======================================================================//
-//  Configuration actions                                               //
+//  Configuration actions                                              //
 //======================================================================//
 
-static void showDeviceInfo(SbgEComHandle *pHandle)
+static void showInfo(SbgEComHandle *h)
 {
-    SbgEComDeviceInfo   info;
-    SbgErrorCode        err;
-
-    err = sbgEComCmdGetInfo(pHandle, &info);
-    if (err == SBG_NO_ERROR)
+    SbgEComDeviceInfo info;
+    if (sbgEComCmdGetInfo(h, &info) == SBG_NO_ERROR)
     {
         char hw[32], fw[32], cal[32];
-
-        sbgVersionToStringEncoded(info.hardwareRev, hw,  sizeof(hw));
-        sbgVersionToStringEncoded(info.firmwareRev, fw,  sizeof(fw));
+        sbgVersionToStringEncoded(info.hardwareRev, hw, sizeof(hw));
+        sbgVersionToStringEncoded(info.firmwareRev, fw, sizeof(fw));
         sbgVersionToStringEncoded(info.calibationRev, cal, sizeof(cal));
-
-        printf("\n  Product Code : %s\n", info.productCode);
-        printf("  Serial Number: %09" PRIu32 "\n", info.serialNumber);
-        printf("  Hardware Rev : %s\n", hw);
-        printf("  Firmware Rev : %s\n", fw);
-        printf("  Calib. Rev   : %s\n\n", cal);
+        printf("\n  Product : %s\n  Serial  : %09" PRIu32 "\n  Hardware: %s\n  Firmware: %s\n  Calib   : %s\n\n",
+               info.productCode, info.serialNumber, hw, fw, cal);
     }
-    else
-    {
-        SBG_LOG_ERROR(err, "unable to read device info");
-    }
+    else printf("  unable to read device info\n");
 }
 
-static void configMotionProfile(SbgEComHandle *pHandle)
+static void cfgMotion(SbgEComHandle *h)
 {
-    int sel;
-
-    printf("\nMotion profiles:\n"
-           "  1 General  2 Automotive  3 Marine  4 Airplane  5 Helicopter\n"
-           "  6 Pedestrian  7 UAV(rotary)  8 Heavy machinery  9 Static  10 Truck\n");
-    sel = promptInt("Select motion profile", SBG_ECOM_MOTION_PROFILE_GENERAL_PURPOSE);
-
-    SbgErrorCode err = sbgEComCmdSensorSetMotionProfileId(pHandle, (SbgEComMotionProfileStdIds)sel);
-    printf(err == SBG_NO_ERROR ? "  OK\n" : "  FAILED (%d)\n", err);
+    printf("\n 1 General 2 Automotive 3 Marine 4 Airplane 5 Helicopter\n"
+           " 6 Pedestrian 7 UAV 8 HeavyMachinery 9 Static 10 Truck\n");
+    result(sbgEComCmdSensorSetMotionProfileId(h, (SbgEComMotionProfileStdIds)promptInt("Motion profile", 1)));
 }
 
-static void configImuAlignment(SbgEComHandle *pHandle)
+static void cfgAlign(SbgEComHandle *h)
 {
-    SbgEComSensorAlignmentInfo  align;
-    float                       leverArm[3];
-    SbgErrorCode                err;
-
-    printf("\nIMU axis directions: 0=Fwd 1=Back 2=Left 3=Right 4=Up 5=Down\n");
-    align.axisDirectionX = (SbgEComAxisDirection)promptInt("  IMU X axis points", SBG_ECOM_ALIGNMENT_FORWARD);
-    align.axisDirectionY = (SbgEComAxisDirection)promptInt("  IMU Y axis points", SBG_ECOM_ALIGNMENT_RIGHT);
-    align.misRoll  = sbgDegToRadf(promptFloat("  Fine misalignment roll  [deg]", 0.0f));
-    align.misPitch = sbgDegToRadf(promptFloat("  Fine misalignment pitch [deg]", 0.0f));
-    align.misYaw   = sbgDegToRadf(promptFloat("  Fine misalignment yaw   [deg]", 0.0f));
-
-    printf("IMU lever arm = position of IMU relative to vehicle reference point (meters):\n");
-    leverArm[0] = promptFloat("  Lever arm X [m]", 0.0f);
-    leverArm[1] = promptFloat("  Lever arm Y [m]", 0.0f);
-    leverArm[2] = promptFloat("  Lever arm Z [m]", 0.0f);
-
-    err = sbgEComCmdSensorSetAlignmentAndLeverArm(pHandle, &align, leverArm);
-    printf(err == SBG_NO_ERROR ? "  OK\n" : "  FAILED (%d)\n", err);
+    SbgEComSensorAlignmentInfo a;
+    float la[3];
+    printf("\nAxis dir: 0=Fwd 1=Back 2=Left 3=Right 4=Up 5=Down\n");
+    a.axisDirectionX = (SbgEComAxisDirection)promptInt("  IMU X points", SBG_ECOM_ALIGNMENT_FORWARD);
+    a.axisDirectionY = (SbgEComAxisDirection)promptInt("  IMU Y points", SBG_ECOM_ALIGNMENT_RIGHT);
+    a.misRoll  = sbgDegToRadf(promptFloat("  misalign roll  [deg]", 0));
+    a.misPitch = sbgDegToRadf(promptFloat("  misalign pitch [deg]", 0));
+    a.misYaw   = sbgDegToRadf(promptFloat("  misalign yaw   [deg]", 0));
+    la[0] = promptFloat("  lever arm X [m]", 0);
+    la[1] = promptFloat("  lever arm Y [m]", 0);
+    la[2] = promptFloat("  lever arm Z [m]", 0);
+    result(sbgEComCmdSensorSetAlignmentAndLeverArm(h, &a, la));
 }
 
-static void configDualAntenna(SbgEComHandle *pHandle)
+static void cfgInit(SbgEComHandle *h)
 {
-    SbgEComGnssInstallation     gnss;
-    SbgErrorCode                err;
-
-    //
-    // Read current installation first so we keep anything we don't touch.
-    //
-    err = sbgEComCmdGnss1InstallationGet(pHandle, &gnss);
-    if (err != SBG_NO_ERROR)
-    {
-        SBG_LOG_ERROR(err, "unable to read GNSS installation");
-        return;
-    }
-
-    printf("\nPRIMARY GNSS antenna lever arm (IMU -> primary antenna, meters):\n");
-    gnss.leverArmPrimary[0] = promptFloat("  Primary X [m]", gnss.leverArmPrimary[0]);
-    gnss.leverArmPrimary[1] = promptFloat("  Primary Y [m]", gnss.leverArmPrimary[1]);
-    gnss.leverArmPrimary[2] = promptFloat("  Primary Z [m]", gnss.leverArmPrimary[2]);
-
-    printf("SECONDARY GNSS antenna lever arm (IMU -> secondary antenna, meters):\n");
-    printf("  (For the Ellipse-D dual-antenna heading, measure this accurately.)\n");
-    gnss.leverArmSecondary[0] = promptFloat("  Secondary X [m]", gnss.leverArmSecondary[0]);
-    gnss.leverArmSecondary[1] = promptFloat("  Secondary Y [m]", gnss.leverArmSecondary[1]);
-    gnss.leverArmSecondary[2] = promptFloat("  Secondary Z [m]", gnss.leverArmSecondary[2]);
-
-    //
-    // Dual precise = use both antennas with an accurately known secondary lever arm.
-    //
-    gnss.leverArmSecondaryMode = SBG_ECOM_GNSS_INSTALLATION_MODE_DUAL_PRECISE;
-    gnss.leverArmPrimaryPrecise = true;
-
-    err = sbgEComCmdGnss1InstallationSet(pHandle, &gnss);
-    printf(err == SBG_NO_ERROR ? "  OK (dual-antenna precise mode)\n" : "  FAILED (%d)\n", err);
+    SbgEComInitConditionConf c;
+    printf("\nInitial conditions (helps fast startup alignment):\n");
+    c.latitude  = promptDouble("  latitude  [deg]", 48.0);
+    c.longitude = promptDouble("  longitude [deg]", 11.0);
+    c.altitude  = promptDouble("  altitude  [m]",   0.0);
+    c.year  = (uint16_t)promptInt("  year",  2026);
+    c.month = (uint8_t) promptInt("  month", 1);
+    c.day   = (uint8_t) promptInt("  day",   1);
+    result(sbgEComCmdSensorSetInitCondition(h, &c));
 }
 
-static void configAidingAssignment(SbgEComHandle *pHandle)
+static void cfgDual(SbgEComHandle *h)
 {
-    SbgEComAidingAssignConf     aiding;
-    SbgErrorCode                err;
-
-    err = sbgEComCmdSensorGetAidingAssignment(pHandle, &aiding);
-    if (err != SBG_NO_ERROR)
-    {
-        SBG_LOG_ERROR(err, "unable to read aiding assignment");
-        return;
-    }
-
-    //
-    // The Ellipse-D has an internal GNSS receiver -> assign GNSS module to INTERNAL.
-    //
-    aiding.gps1Port = SBG_ECOM_MODULE_INTERNAL;
-
-    printf("\nRTCM (RTK corrections) input port: 0=PORT_A 1=PORT_B 2=PORT_C 4=PORT_E 255=disabled\n");
-    aiding.rtcmPort = (SbgEComModulePortAssignment)promptInt("  RTCM port", aiding.rtcmPort);
-
-    err = sbgEComCmdSensorSetAidingAssignment(pHandle, &aiding);
-    printf(err == SBG_NO_ERROR ? "  OK (GNSS=internal)\n" : "  FAILED (%d)\n", err);
+    SbgEComGnssInstallation g;
+    if (sbgEComCmdGnss1InstallationGet(h, &g) != SBG_NO_ERROR) { printf("  read failed\n"); return; }
+    printf("\nPrimary antenna lever arm (IMU->primary, m):\n");
+    g.leverArmPrimary[0] = promptFloat("  X", g.leverArmPrimary[0]);
+    g.leverArmPrimary[1] = promptFloat("  Y", g.leverArmPrimary[1]);
+    g.leverArmPrimary[2] = promptFloat("  Z", g.leverArmPrimary[2]);
+    printf("Secondary antenna lever arm (IMU->secondary, m) — measure accurately for heading:\n");
+    g.leverArmSecondary[0] = promptFloat("  X", g.leverArmSecondary[0]);
+    g.leverArmSecondary[1] = promptFloat("  Y", g.leverArmSecondary[1]);
+    g.leverArmSecondary[2] = promptFloat("  Z", g.leverArmSecondary[2]);
+    g.leverArmSecondaryMode = SBG_ECOM_GNSS_INSTALLATION_MODE_DUAL_PRECISE;
+    g.leverArmPrimaryPrecise = true;
+    result(sbgEComCmdGnss1InstallationSet(h, &g));
 }
 
-static void configUart(SbgEComHandle *pHandle)
+static void cfgGnssModel(SbgEComHandle *h)
 {
-    SbgEComInterfaceConf    conf;
-    SbgErrorCode            err;
-    int                     portSel;
-    SbgEComPortId           portId;
-
-    printf("\nUART port to configure: 0=COM_A 1=COM_B 2=COM_C 3=COM_D 4=COM_E\n");
-    portSel = promptInt("  Port", SBG_ECOM_IF_COM_A);
-    portId  = (SbgEComPortId)portSel;
-
-    err = sbgEComCmdInterfaceGetUartConf(pHandle, portId, &conf);
-    if (err != SBG_NO_ERROR)
-    {
-        SBG_LOG_ERROR(err, "unable to read UART config");
-        return;
-    }
-
-    conf.baudRate = (uint32_t)promptInt("  Baud rate", (int)conf.baudRate);
-    printf("  Mode: 0=OFF 1=RS-232 2=RS-422\n");
-    conf.mode = (SbgEComPortMode)promptInt("  Mode", conf.mode);
-
-    err = sbgEComCmdInterfaceSetUartConf(pHandle, portId, &conf);
-    printf(err == SBG_NO_ERROR ? "  OK (re-open at new baud after save+reboot)\n" : "  FAILED (%d)\n", err);
+    printf("\nGNSS model id (Ellipse-D internal = check sbgEComCmdGnss.h; INTERNAL typical)\n");
+    result(sbgEComCmdGnss1SetModelId(h, (SbgEComGnssModelsStdIds)promptInt("GNSS model id", SBG_ECOM_GNSS_MODEL_INTERNAL)));
 }
 
-static void configOutputs(SbgEComHandle *pHandle)
+static void cfgGnssReject(SbgEComHandle *h)
 {
-    //
-    // Apply a sensible default output set on PORT_A at 25 Hz (DIV_8 of 200 Hz),
-    // GPS logs at their own rate. Adjust to taste.
-    //
-    struct { SbgEComMsgId id; SbgEComOutputMode mode; const char *name; } outs[] = {
-        { SBG_ECOM_LOG_IMU_DATA,  SBG_ECOM_OUTPUT_MODE_DIV_8,  "IMU_DATA  (25 Hz)" },
-        { SBG_ECOM_LOG_EKF_EULER, SBG_ECOM_OUTPUT_MODE_DIV_8,  "EKF_EULER (25 Hz)" },
-        { SBG_ECOM_LOG_EKF_NAV,   SBG_ECOM_OUTPUT_MODE_DIV_8,  "EKF_NAV   (25 Hz)" },
-        { SBG_ECOM_LOG_GPS1_POS,  SBG_ECOM_OUTPUT_MODE_DIV_40, "GPS1_POS  (5 Hz)"  },
-        { SBG_ECOM_LOG_GPS1_VEL,  SBG_ECOM_OUTPUT_MODE_DIV_40, "GPS1_VEL  (5 Hz)"  },
-        { SBG_ECOM_LOG_GPS1_HDT,  SBG_ECOM_OUTPUT_MODE_DIV_40, "GPS1_HDT  (5 Hz, dual-antenna heading)" },
-        { SBG_ECOM_LOG_STATUS,    SBG_ECOM_OUTPUT_MODE_DIV_40, "STATUS    (5 Hz)"  },
-        { SBG_ECOM_LOG_UTC_TIME,  SBG_ECOM_OUTPUT_MODE_DIV_40, "UTC_TIME  (5 Hz)"  },
+    SbgEComGnssRejectionConf r;
+    printf("\nRejection mode: 0=NeverAccept 1=Automatic 2=AlwaysAccept\n");
+    r.position = (SbgEComRejectionMode)promptInt("  position", SBG_ECOM_AUTOMATIC_MODE);
+    r.velocity = (SbgEComRejectionMode)promptInt("  velocity", SBG_ECOM_AUTOMATIC_MODE);
+    r.hdt      = (SbgEComRejectionMode)promptInt("  heading (hdt)", SBG_ECOM_AUTOMATIC_MODE);
+    result(sbgEComCmdGnss1SetRejection(h, &r));
+}
+
+static void cfgMagModel(SbgEComHandle *h)
+{
+    printf("\nMag model: 201=INTERNAL_NORMAL (Ellipse-D) 203=ECOM_NORMAL (external)\n");
+    result(sbgEComCmdMagSetModelId(h, (SbgEComMagModelsStdId)promptInt("Mag model id", SBG_ECOM_MAG_MODEL_INTERNAL_NORMAL)));
+}
+static void cfgMagReject(SbgEComHandle *h)
+{
+    SbgEComMagRejectionConf r;
+    printf("\nMag rejection: 0=NeverAccept 1=Automatic 2=AlwaysAccept\n");
+    r.magneticField = (SbgEComRejectionMode)promptInt("  magnetic field", SBG_ECOM_AUTOMATIC_MODE);
+    result(sbgEComCmdMagSetRejection(h, &r));
+}
+
+static void cfgOdo(SbgEComHandle *h)
+{
+    SbgEComOdoConf c;
+    printf("\nOdometer / DMI configuration:\n");
+    c.gain        = promptFloat("  gain [pulses/m]", 1000.0f);
+    c.gainError   = (uint8_t)promptInt("  gain error [%]", 1);
+    c.reverseMode = promptInt("  reverse mode (0/1)", 0) ? true : false;
+    result(sbgEComCmdOdoSetConf(h, &c));
+}
+static void cfgOdoLever(SbgEComHandle *h)
+{
+    float la[3];
+    printf("\nOdometer lever arm (IMU->odometer, m):\n");
+    la[0] = promptFloat("  X", 0); la[1] = promptFloat("  Y", 0); la[2] = promptFloat("  Z", 0);
+    result(sbgEComCmdOdoSetLeverArm(h, la));
+}
+static void cfgOdoReject(SbgEComHandle *h)
+{
+    SbgEComOdoRejectionConf r;
+    printf("\nOdometer rejection: 0=NeverAccept 1=Automatic 2=AlwaysAccept\n");
+    r.velocity = (SbgEComRejectionMode)promptInt("  velocity", SBG_ECOM_AUTOMATIC_MODE);
+    result(sbgEComCmdOdoSetRejection(h, &r));
+}
+
+static void cfgAiding(SbgEComHandle *h)
+{
+    SbgEComAidingAssignConf a;
+    if (sbgEComCmdSensorGetAidingAssignment(h, &a) != SBG_NO_ERROR) { printf("  read failed\n"); return; }
+    printf("\nPort: 0=A 1=B 2=C 4=E 5=Internal 255=Disabled    Sync: 5=Internal 255=Disabled\n");
+    a.gps1Port    = (SbgEComModulePortAssignment)promptInt("  GNSS port",    a.gps1Port);
+    a.gps1Sync    = (SbgEComModuleSyncAssignment)promptInt("  GNSS sync",    a.gps1Sync);
+    a.rtcmPort    = (SbgEComModulePortAssignment)promptInt("  RTCM port",    a.rtcmPort);
+    a.airDataPort = (SbgEComModulePortAssignment)promptInt("  AirData port", a.airDataPort);
+    a.dvlPort     = (SbgEComModulePortAssignment)promptInt("  DVL port",     a.dvlPort);
+    a.odometerPinsConf = (SbgEComOdometerPinAssignment)promptInt("  Odometer pins conf", a.odometerPinsConf);
+    result(sbgEComCmdSensorSetAidingAssignment(h, &a));
+}
+
+static void cfgSyncIn(SbgEComHandle *h)
+{
+    SbgEComSyncInConf c;
+    printf("\nSync IN id: 0=A 1=B 2=C 3=D\n");
+    int id = promptInt("  sync in id", SBG_ECOM_SYNC_IN_A);
+    printf("Sensitivity: 0=Disabled 1=FallingEdge 2=RisingEdge 3=BothEdges\n");
+    c.sensitivity = (SbgEComSyncInSensitivity)promptInt("  sensitivity", SBG_ECOM_SYNC_IN_RISING_EDGE);
+    c.delay = promptInt("  delay [ns]", 0);
+    result(sbgEComCmdSyncInSetConf(h, (SbgEComSyncInId)id, &c));
+}
+static void cfgSyncOut(SbgEComHandle *h)
+{
+    SbgEComSyncOutConf c;
+    printf("\nSync OUT id: 0=A 1=B\n");
+    int id = promptInt("  sync out id", SBG_ECOM_SYNC_OUT_A);
+    printf("Function: 0=Disabled 1=MainLoop(200Hz) 2=Div2 4=Div4 8=Div8 40=Div40 ...\n");
+    c.outputFunction = (SbgEComSyncOutFunction)promptInt("  function", SBG_ECOM_SYNC_OUT_MODE_DISABLED);
+    printf("Polarity: 0=FallingEdge 1=RisingEdge 2=Toggle\n");
+    c.polarity = (SbgEComSyncOutPolarity)promptInt("  polarity", SBG_ECOM_SYNC_OUT_RISING_EDGE);
+    c.duration = (uint32_t)promptInt("  pulse width [ns]", 100000);
+    result(sbgEComCmdSyncOutSetConf(h, (SbgEComSyncOutId)id, &c));
+}
+
+static void cfgUart(SbgEComHandle *h)
+{
+    SbgEComInterfaceConf c;
+    printf("\nUART port: 0=COM_A 1=COM_B 2=COM_C 3=COM_D 4=COM_E\n");
+    SbgEComPortId pid = (SbgEComPortId)promptInt("  port", SBG_ECOM_IF_COM_A);
+    if (sbgEComCmdInterfaceGetUartConf(h, pid, &c) != SBG_NO_ERROR) { printf("  read failed\n"); return; }
+    c.baudRate = (uint32_t)promptInt("  baud rate", (int)c.baudRate);
+    printf("Mode: 0=OFF 1=RS-232 2=RS-422\n");
+    c.mode = (SbgEComPortMode)promptInt("  mode", c.mode);
+    result(sbgEComCmdInterfaceSetUartConf(h, pid, &c));
+}
+static void cfgCan(SbgEComHandle *h)
+{
+    printf("\nCAN bitrate [kbit/s]: 0=disabled 10 20 25 50 100 125 250 500 750 1000\n");
+    int kbit = promptInt("  bitrate", 500);
+    SbgEComCanBitRate br;
+    switch (kbit) {
+    case 10: br=SBG_ECOM_CAN_BITRATE_10; break; case 20: br=SBG_ECOM_CAN_BITRATE_20; break;
+    case 25: br=SBG_ECOM_CAN_BITRATE_25; break; case 50: br=SBG_ECOM_CAN_BITRATE_50; break;
+    case 100: br=SBG_ECOM_CAN_BITRATE_100; break; case 125: br=SBG_ECOM_CAN_BITRATE_125; break;
+    case 250: br=SBG_ECOM_CAN_BITRATE_250; break; case 500: br=SBG_ECOM_CAN_BITRATE_500; break;
+    case 750: br=SBG_ECOM_CAN_BITRATE_750; break; case 1000: br=SBG_ECOM_CAN_BITRATE_1000; break;
+    default: br=SBG_ECOM_CAN_BITRATE_DISABLED; break; }
+    printf("Mode: 0=Undefined 1=Normal 2=Spy\n");
+    SbgEComCanMode mode = (SbgEComCanMode)promptInt("  mode", SBG_ECOM_CAN_MODE_NORMAL);
+    result(sbgEComCmdInterfaceSetCanConf(h, br, mode));
+}
+
+static void cfgAdvanced(SbgEComHandle *h)
+{
+    SbgEComAdvancedConf c;
+    printf("\nTime reference: 0=Disabled 1=SyncInA 2=UTC/GPS1\n");
+    c.timeReference = (SbgEComTimeReferenceSrc)promptInt("  time reference", SBG_ECOM_TIME_REF_UTC_GPS_1);
+    c.gnssOptions = (uint32_t)promptInt("  GNSS options bitmask (0 default)", 0);
+    c.nmeaOptions = (uint32_t)promptInt("  NMEA options bitmask (0 default)", 0);
+    result(sbgEComCmdAdvancedSetConf(h, &c));
+}
+static void cfgThresholds(SbgEComHandle *h)
+{
+    SbgEComValidityThresholds t;
+    printf("\nValidity thresholds (raise valid flags below these std-dev values):\n");
+    t.positionThreshold = promptFloat("  position [m]",     1.0f);
+    t.velocityThreshold = promptFloat("  velocity [m/s]",   0.5f);
+    t.attitudeThreshold = sbgDegToRadf(promptFloat("  attitude [deg]", 1.0f));
+    t.headingThreshold  = sbgDegToRadf(promptFloat("  heading  [deg]", 2.0f));
+    result(sbgEComCmdAdvancedSetThresholds(h, &t));
+}
+
+static void cfgOutputsDefault(SbgEComHandle *h)
+{
+    struct { SbgEComMsgId id; SbgEComOutputMode m; const char *n; } o[] = {
+        { SBG_ECOM_LOG_IMU_DATA,  SBG_ECOM_OUTPUT_MODE_DIV_8,  "IMU_DATA 25Hz" },
+        { SBG_ECOM_LOG_EKF_EULER, SBG_ECOM_OUTPUT_MODE_DIV_8,  "EKF_EULER 25Hz" },
+        { SBG_ECOM_LOG_EKF_NAV,   SBG_ECOM_OUTPUT_MODE_DIV_8,  "EKF_NAV 25Hz" },
+        { SBG_ECOM_LOG_GPS1_POS,  SBG_ECOM_OUTPUT_MODE_DIV_40, "GPS1_POS 5Hz" },
+        { SBG_ECOM_LOG_GPS1_HDT,  SBG_ECOM_OUTPUT_MODE_DIV_40, "GPS1_HDT 5Hz" },
+        { SBG_ECOM_LOG_STATUS,    SBG_ECOM_OUTPUT_MODE_DIV_40, "STATUS 5Hz" },
+        { SBG_ECOM_LOG_UTC_TIME,  SBG_ECOM_OUTPUT_MODE_DIV_40, "UTC_TIME 5Hz" },
     };
-
     printf("\nEnabling default output set on PORT_A:\n");
-    for (size_t i = 0; i < SBG_ARRAY_SIZE(outs); i++)
+    for (size_t i = 0; i < SBG_ARRAY_SIZE(o); i++)
     {
-        SbgErrorCode err = sbgEComCmdOutputSetConf(pHandle, SBG_ECOM_OUTPUT_PORT_A,
-                                                   SBG_ECOM_CLASS_LOG_ECOM_0, outs[i].id, outs[i].mode);
-        printf("  %-45s %s\n", outs[i].name, err == SBG_NO_ERROR ? "OK" : "FAILED");
+        SbgErrorCode e = sbgEComCmdOutputSetConf(h, SBG_ECOM_OUTPUT_PORT_A, SBG_ECOM_CLASS_LOG_ECOM_0, o[i].id, o[i].m);
+        printf("  %-16s %s\n", o[i].n, e == SBG_NO_ERROR ? "OK" : "FAIL");
     }
 }
-
-static void liveMonitor(SbgEComHandle *pHandle)
+static void cfgOutputSingle(SbgEComHandle *h)
 {
-    printf("\nStreaming live data — press Ctrl-C to stop and return to the menu.\n\n");
-    gStopMonitor = 0;
+    printf("\nOutput port: 0=A 2=C 3=D 4=E\n");
+    int port = promptInt("  port", SBG_ECOM_OUTPUT_PORT_A);
+    int msg  = promptInt("  log message id (e.g. 6=IMU_DATA, 1=STATUS, 6..)", SBG_ECOM_LOG_IMU_DATA);
+    printf("Mode: 0=disabled, or divider 8=25Hz 40=5Hz 200=1Hz, 1ms/2ms/4ms via enum values\n");
+    int mode = promptInt("  output mode", SBG_ECOM_OUTPUT_MODE_DIV_8);
+    result(sbgEComCmdOutputSetConf(h, (SbgEComOutputPort)port, SBG_ECOM_CLASS_LOG_ECOM_0, (SbgEComMsgId)msg, (SbgEComOutputMode)mode));
+}
+static void cfgNmeaTalker(SbgEComHandle *h)
+{
+    char id[8];
+    int port = promptInt("\nOutput port (0=A 2=C 3=D 4=E)", SBG_ECOM_OUTPUT_PORT_A);
+    promptStr("  NMEA talker id (2 chars, e.g. GP)", "GP", id, sizeof(id));
+    result(sbgEComCmdOutputSetNmeaTalkerId(h, (SbgEComOutputPort)port, id));
+}
+static void cfgClassEnable(SbgEComHandle *h)
+{
+    int port = promptInt("\nOutput port (0=A 2=C 3=D 4=E)", SBG_ECOM_OUTPUT_PORT_A);
+    int cls  = promptInt("  class id (0=ECOM_0 logs, 1=ECOM_1, 2=NMEA, ...)", SBG_ECOM_CLASS_LOG_ECOM_0);
+    int en   = promptInt("  enable (1) / disable (0)", 1);
+    result(sbgEComCmdOutputClassSetEnable(h, (SbgEComOutputPort)port, (SbgEComClass)cls, en ? true : false));
+}
+
+static void cfgExport(SbgEComHandle *h)
+{
+    static uint8_t buf[32768];
+    char path[128];
+    size_t size = 0;
+    promptStr("\nExport settings to file", "ellipse-d-settings.bin", path, sizeof(path));
+    SbgErrorCode e = sbgEComCmdExportSettings(h, buf, &size, sizeof(buf));
+    if (e == SBG_NO_ERROR)
+    {
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite(buf, 1, size, f); fclose(f); printf("  -> wrote %zu bytes to %s\n", size, path); }
+        else printf("  -> cannot write %s\n", path);
+    }
+    else result(e);
+}
+static void cfgImport(SbgEComHandle *h)
+{
+    static uint8_t buf[32768];
+    char path[128];
+    promptStr("\nImport settings from file", "ellipse-d-settings.bin", path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) { printf("  -> cannot open %s\n", path); return; }
+    size_t size = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    printf("  read %zu bytes; importing...\n", size);
+    result(sbgEComCmdImportSettings(h, buf, size));
+}
+
+static void settingsAction(SbgEComHandle *h, SbgEComSettingsAction a, const char *warn)
+{
+    printf("\n%s (y/N): ", warn);
+    int c = getchar();
+    flushLine();
+    if (c == 'y' || c == 'Y') result(sbgEComCmdSettingsAction(h, a));
+    else printf("  cancelled.\n");
+}
+
+static void liveMonitor(SbgEComHandle *h)
+{
+    printf("\nLive monitor — Ctrl-C to stop.\n");
+    gStop = 0;
     signal(SIGINT, onSigInt);
-
-    sbgEComSetReceiveLogCallback(pHandle, onLogReceived, NULL);
-
-    while (!gStopMonitor)
-    {
-        SbgErrorCode err = sbgEComHandle(pHandle);
-        if (err == SBG_NOT_READY)
-        {
-            sbgSleep(1);
-        }
-    }
-
-    sbgEComSetReceiveLogCallback(pHandle, NULL, NULL);
+    sbgEComSetReceiveLogCallback(h, onLog, NULL);
+    while (!gStop) { if (sbgEComHandle(h) == SBG_NOT_READY) sbgSleep(1); }
+    sbgEComSetReceiveLogCallback(h, NULL, NULL);
     signal(SIGINT, SIG_DFL);
-    printf("\nStopped monitoring.\n");
-}
-
-static void saveAndReboot(SbgEComHandle *pHandle)
-{
-    printf("\nSave settings to non-volatile memory and reboot? (y/N): ");
-    if (getchar() == 'y')
-    {
-        SbgErrorCode err = sbgEComCmdSettingsAction(pHandle, SBG_ECOM_SAVE_SETTINGS);
-        printf(err == SBG_NO_ERROR ? "  Saved + rebooting.\n" : "  FAILED (%d)\n", err);
-    }
-    else
-    {
-        printf("  Cancelled.\n");
-    }
-    flushLine();
-}
-
-static void restoreDefaults(SbgEComHandle *pHandle)
-{
-    printf("\nRESTORE FACTORY DEFAULTS and reboot? This erases your config. (y/N): ");
-    if (getchar() == 'y')
-    {
-        SbgErrorCode err = sbgEComCmdSettingsAction(pHandle, SBG_ECOM_RESTORE_DEFAULT_SETTINGS);
-        printf(err == SBG_NO_ERROR ? "  Restored + rebooting.\n" : "  FAILED (%d)\n", err);
-    }
-    else
-    {
-        printf("  Cancelled.\n");
-    }
-    flushLine();
+    printf("\nstopped.\n");
 }
 
 //======================================================================//
-//  Menu loop                                                           //
+//  Menu                                                                //
 //======================================================================//
 
-static void runMenu(SbgEComHandle *pHandle)
+static void menu(SbgEComHandle *h)
 {
-    int running = 1;
-
-    while (running)
+    for (;;)
     {
-        int choice;
-
-        printf("\n================ Ellipse-D Configuration ================\n"
-               "  1) Show device info\n"
-               "  2) Set motion profile\n"
-               "  3) Set IMU alignment & lever arm\n"
-               "  4) Set GNSS dual-antenna installation\n"
-               "  5) Set aiding assignment (internal GNSS / RTCM port)\n"
-               "  6) Configure UART port (baud / RS-232 / RS-422)\n"
-               "  7) Apply default output logs on PORT_A\n"
-               "  8) Live data monitor\n"
-               "  9) SAVE settings + reboot\n"
-               " 10) Restore factory defaults + reboot\n"
-               "  0) Quit\n"
-               "=========================================================\n");
-        choice = promptInt("Select", 0);
-
-        switch (choice)
+        printf(
+        "\n==================== Ellipse-D Configuration ====================\n"
+        " DEVICE        1) Show info        2) Live monitor\n"
+        " SENSOR        3) Motion profile   4) IMU alignment+lever  5) Initial conditions\n"
+        " GNSS          6) Dual-antenna     7) GNSS model           8) GNSS rejection\n"
+        " MAG           9) Mag model       10) Mag rejection\n"
+        " ODOMETER     11) Odo config      12) Odo lever arm       13) Odo rejection\n"
+        " AIDING       14) Aiding assignment (GNSS/RTCM/AirData/DVL/Odo)\n"
+        " SYNC         15) Sync IN         16) Sync OUT\n"
+        " INTERFACES   17) UART port       18) CAN bus\n"
+        " ADVANCED     19) Time/options    20) Validity thresholds\n"
+        " OUTPUTS      21) Default logs    22) Single log  23) NMEA talker  24) Enable/disable class\n"
+        " SETTINGS     25) Export to file  26) Import from file\n"
+        "              27) SAVE+reboot     28) Restore defaults    29) Reboot only\n"
+        "               0) Quit\n"
+        "=================================================================\n");
+        switch (promptInt("Select", 0))
         {
-        case 1:  showDeviceInfo(pHandle);        break;
-        case 2:  configMotionProfile(pHandle);   break;
-        case 3:  configImuAlignment(pHandle);    break;
-        case 4:  configDualAntenna(pHandle);     break;
-        case 5:  configAidingAssignment(pHandle);break;
-        case 6:  configUart(pHandle);            break;
-        case 7:  configOutputs(pHandle);         break;
-        case 8:  liveMonitor(pHandle);           break;
-        case 9:  saveAndReboot(pHandle);         break;
-        case 10: restoreDefaults(pHandle);       break;
-        case 0:  running = 0;                    break;
-        default: printf("  Unknown choice.\n");  break;
+        case 1:  showInfo(h);          break;
+        case 2:  liveMonitor(h);       break;
+        case 3:  cfgMotion(h);         break;
+        case 4:  cfgAlign(h);          break;
+        case 5:  cfgInit(h);           break;
+        case 6:  cfgDual(h);           break;
+        case 7:  cfgGnssModel(h);      break;
+        case 8:  cfgGnssReject(h);     break;
+        case 9:  cfgMagModel(h);       break;
+        case 10: cfgMagReject(h);      break;
+        case 11: cfgOdo(h);            break;
+        case 12: cfgOdoLever(h);       break;
+        case 13: cfgOdoReject(h);      break;
+        case 14: cfgAiding(h);         break;
+        case 15: cfgSyncIn(h);         break;
+        case 16: cfgSyncOut(h);        break;
+        case 17: cfgUart(h);           break;
+        case 18: cfgCan(h);            break;
+        case 19: cfgAdvanced(h);       break;
+        case 20: cfgThresholds(h);     break;
+        case 21: cfgOutputsDefault(h); break;
+        case 22: cfgOutputSingle(h);   break;
+        case 23: cfgNmeaTalker(h);     break;
+        case 24: cfgClassEnable(h);    break;
+        case 25: cfgExport(h);         break;
+        case 26: cfgImport(h);         break;
+        case 27: settingsAction(h, SBG_ECOM_SAVE_SETTINGS, "Save settings to flash and reboot?"); break;
+        case 28: settingsAction(h, SBG_ECOM_RESTORE_DEFAULT_SETTINGS, "RESTORE FACTORY DEFAULTS and reboot?"); break;
+        case 29: settingsAction(h, SBG_ECOM_REBOOT_ONLY, "Reboot the device now?"); break;
+        case 0:  return;
+        default: printf("  unknown choice\n"); break;
         }
     }
 }
@@ -390,36 +449,25 @@ static void runMenu(SbgEComHandle *pHandle)
 
 int main(int argc, char **argv)
 {
-    SbgErrorCode    err;
-    SbgInterface    iface;
-    SbgEComHandle   handle;
+    SbgErrorCode  err;
+    SbgInterface  iface;
+    SbgEComHandle handle;
 
     if (argc != 3)
     {
-        printf("Usage: %s <SERIAL_DEVICE> <BAUDRATE>\n", argv[0]);
-        printf("Example: %s /dev/ttyUSB0 921600\n", argv[0]);
+        printf("Usage: %s <SERIAL_DEVICE> <BAUDRATE>\nExample: %s /dev/ttyUSB0 921600\n", argv[0], argv[0]);
         return EXIT_FAILURE;
     }
 
     err = sbgInterfaceSerialCreate(&iface, argv[1], atoi(argv[2]));
-    if (err != SBG_NO_ERROR)
-    {
-        SBG_LOG_ERROR(err, "unable to open serial interface %s", argv[1]);
-        return EXIT_FAILURE;
-    }
+    if (err != SBG_NO_ERROR) { SBG_LOG_ERROR(err, "unable to open serial interface %s", argv[1]); return EXIT_FAILURE; }
 
     err = sbgEComInit(&handle, &iface);
-    if (err != SBG_NO_ERROR)
-    {
-        SBG_LOG_ERROR(err, "unable to initialize sbgECom");
-        sbgInterfaceDestroy(&iface);
-        return EXIT_FAILURE;
-    }
+    if (err != SBG_NO_ERROR) { SBG_LOG_ERROR(err, "unable to initialize sbgECom"); sbgInterfaceDestroy(&iface); return EXIT_FAILURE; }
 
     printf("Connected to %s @ %s baud (sbgECom %s)\n", argv[1], argv[2], SBG_E_COM_VERSION_STR);
-    showDeviceInfo(&handle);
-
-    runMenu(&handle);
+    showInfo(&handle);
+    menu(&handle);
 
     sbgEComClose(&handle);
     sbgInterfaceDestroy(&iface);

@@ -35,8 +35,15 @@ toolbar before pressing **Connect**.
 - Color-coded EKF solution mode and RTK fix quality
 - Rolling accelerometer & gyroscope plots
 - Per-log data-rate readout
-- Configuration: motion profile, dual-antenna lever arms, enable default outputs,
-  save-to-flash + reboot, restore factory defaults
+- **Complete configuration** via tabbed panels:
+  - **Sensor:** motion profile, IMU alignment + lever arm, initial conditions
+  - **GNSS:** dual-antenna lever arms, receiver model, rejection (pos/vel/hdt)
+  - **Mag/Odo:** magnetometer model + rejection; odometer config, lever arm, rejection
+  - **Sync/IF:** sync-in, sync-out, UART (baud/RS-232/422), CAN (bitrate/mode)
+  - **Outputs:** default set, per-log rate, NMEA talker id, full aiding assignment
+  - **Advanced:** time-reference source, GNSS/NMEA option bits, validity thresholds
+  - **Backup:** export/import the entire config to/from a file, save + reboot,
+    reboot, restore factory defaults
 
 ## Note on serial permissions
 Your user must be in the `dialout` group to open `/dev/ttyUSB0`:

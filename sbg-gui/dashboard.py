@@ -22,7 +22,8 @@ from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QComboBox, QLineEdit,
     QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox, QFrame, QSizePolicy,
-    QDoubleSpinBox, QFormLayout, QMessageBox,
+    QDoubleSpinBox, QSpinBox, QCheckBox, QFormLayout, QMessageBox,
+    QTabWidget, QScrollArea, QFileDialog,
 )
 
 BRIDGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge", "build", "sbg-bridge")
@@ -40,6 +41,28 @@ MOTION_PROFILES = [
     ("Helicopter", 5), ("Pedestrian", 6), ("UAV (rotary)", 7), ("Heavy machinery", 8),
     ("Static", 9), ("Truck", 10),
 ]
+AXIS_DIRS = [("Forward", 0), ("Backward", 1), ("Left", 2), ("Right", 3), ("Up", 4), ("Down", 5)]
+REJECTION = [("Never accept", 0), ("Automatic", 1), ("Always accept", 2)]
+GNSS_MODELS = [("Internal (Ellipse-D)", 101), ("NMEA external", 102), ("u-blox external", 104),
+               ("Novatel external", 106), ("Septentrio external", 109)]
+MAG_MODELS = [("Internal normal", 201), ("Internal (v2 compat)", 202), ("ECOM external", 203)]
+PORT_ASSIGN = [("PORT_A", 0), ("PORT_B", 1), ("PORT_C", 2), ("PORT_E", 4), ("Internal", 5), ("Disabled", 255)]
+SYNC_ASSIGN = [("Internal", 5), ("Disabled", 255)]
+TIME_REF = [("Disabled", 0), ("Sync In A", 1), ("UTC / GPS1", 2)]
+SYNC_IN_SENS = [("Disabled", 0), ("Falling edge", 1), ("Rising edge", 2), ("Both edges", 3)]
+SYNC_OUT_FUNC = [("Disabled", 0), ("Main loop 200Hz", 1), ("100Hz", 2), ("50Hz", 4),
+                 ("25Hz", 8), ("20Hz", 10), ("10Hz", 20), ("5Hz", 40), ("2Hz", 100)]
+SYNC_OUT_POL = [("Falling edge", 0), ("Rising edge", 1), ("Toggle", 2)]
+CAN_BITRATE = [("Disabled", 0), ("250 kbit/s", 250), ("500 kbit/s", 500), ("1 Mbit/s", 1000),
+               ("125 kbit/s", 125), ("100 kbit/s", 100), ("50 kbit/s", 50)]
+CAN_MODE = [("Normal", 1), ("Spy (listen-only)", 2)]
+UART_PORT = [("COM_A", 0), ("COM_B", 1), ("COM_C", 2), ("COM_D", 3), ("COM_E", 4)]
+UART_MODE = [("Off", 0), ("RS-232", 1), ("RS-422", 2)]
+OUTPUT_PORT = [("PORT_A", 0), ("PORT_C", 2), ("PORT_D", 3), ("PORT_E", 4)]
+OUTPUT_MODE = [("Disabled", 0), ("200 Hz", 1), ("100 Hz", 2), ("50 Hz", 4), ("25 Hz", 8),
+               ("20 Hz", 10), ("10 Hz", 20), ("5 Hz", 40), ("1 Hz", 200)]
+LOG_IDS = [("STATUS", 1), ("UTC_TIME", 2), ("IMU_DATA", 3), ("MAG", 4), ("EKF_EULER", 6),
+           ("EKF_NAV", 8), ("GPS1_VEL", 13), ("GPS1_POS", 14), ("GPS1_HDT", 15)]
 
 # EKF solution status bits
 SOL_ATT, SOL_HDG, SOL_VEL, SOL_POS = 1 << 4, 1 << 5, 1 << 6, 1 << 7
@@ -365,54 +388,235 @@ class Dashboard(QWidget):
         self.rate_lbl.setWordWrap(True)
         right.addWidget(self.rate_lbl)
 
-        cfg = QGroupBox("Configure")
-        cfg.setStyleSheet("QGroupBox{color:#8a93a3;font-weight:bold;border:1px solid #333;border-radius:6px;margin-top:8px;padding-top:10px;}")
-        form = QVBoxLayout(cfg)
+        right.addWidget(self._build_config_tabs(), 1)
+        mid.addLayout(right, 3)
 
-        self.motion = QComboBox()
-        for name, mid_ in MOTION_PROFILES:
-            self.motion.addItem(name, mid_)
-        mrow = QHBoxLayout()
-        mrow.addWidget(QLabel("Motion:"))
-        mrow.addWidget(self.motion)
-        apply_motion = QPushButton("Set")
-        apply_motion.clicked.connect(lambda: self.send(f"motion {self.motion.currentData()}"))
-        mrow.addWidget(apply_motion)
-        form.addLayout(mrow)
+    # ----- configuration tabs ---------------------------------------------
+    def _combo(self, options, default_index=0):
+        c = QComboBox()
+        for name, val in options:
+            c.addItem(name, val)
+        c.setCurrentIndex(default_index)
+        return c
 
-        # dual antenna lever arms
-        la = QFormLayout()
-        self.la_spins = []
-        for lbl in ("Pri X", "Pri Y", "Pri Z", "Sec X", "Sec Y", "Sec Z"):
-            s = QDoubleSpinBox()
-            s.setRange(-50, 50)
-            s.setSingleStep(0.01)
-            s.setDecimals(3)
-            s.setSuffix(" m")
-            self.la_spins.append(s)
-            la.addRow(lbl, s)
-        form.addLayout(la)
-        apply_dual = QPushButton("Set dual-antenna lever arms")
-        apply_dual.clicked.connect(self._send_dual)
-        form.addWidget(apply_dual)
+    def _spin(self, lo, hi, step=0.01, dec=3, suffix="", val=0.0):
+        s = QDoubleSpinBox()
+        s.setRange(lo, hi)
+        s.setSingleStep(step)
+        s.setDecimals(dec)
+        if suffix:
+            s.setSuffix(suffix)
+        s.setValue(val)
+        return s
 
-        out_btn = QPushButton("Enable default outputs (PORT_A)")
-        out_btn.clicked.connect(lambda: self.send("outputs"))
-        form.addWidget(out_btn)
+    def _ispin(self, lo, hi, val=0):
+        s = QSpinBox()
+        s.setRange(lo, hi)
+        s.setValue(val)
+        return s
 
-        save_btn = QPushButton("SAVE settings + reboot")
+    def _apply_btn(self, text, fn):
+        b = QPushButton(text)
+        b.clicked.connect(fn)
+        return b
+
+    def _build_config_tabs(self):
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
+            "QTabWidget::pane{border:1px solid #333;border-radius:6px;}"
+            "QTabBar::tab{background:#262b36;color:#cdd3dc;padding:5px 9px;}"
+            "QTabBar::tab:selected{background:#34506e;color:#fff;}")
+
+        def page():
+            w = QWidget()
+            f = QFormLayout(w)
+            f.setLabelAlignment(Qt.AlignRight)
+            return w, f
+
+        def scroll(w):
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setWidget(w)
+            return sa
+
+        # --- SENSOR ------------------------------------------------------
+        w, f = page()
+        self.motion = self._combo(MOTION_PROFILES)
+        f.addRow("Motion profile", self.motion)
+        f.addRow(self._apply_btn("Set motion profile", lambda: self.send(f"motion {self.motion.currentData()}")))
+        self.ax_x = self._combo(AXIS_DIRS, 0)   # Forward
+        self.ax_y = self._combo(AXIS_DIRS, 3)   # Right
+        f.addRow("IMU X axis", self.ax_x)
+        f.addRow("IMU Y axis", self.ax_y)
+        self.mis = [self._spin(-180, 180, 0.1, 2, " °") for _ in range(3)]
+        for lbl, s in zip(("Misalign roll", "Misalign pitch", "Misalign yaw"), self.mis):
+            f.addRow(lbl, s)
+        self.imu_la = [self._spin(-50, 50, 0.01, 3, " m") for _ in range(3)]
+        for lbl, s in zip(("Lever arm X", "Lever arm Y", "Lever arm Z"), self.imu_la):
+            f.addRow(lbl, s)
+        f.addRow(self._apply_btn("Set alignment + lever arm", self._send_align))
+        self.init_lat = self._spin(-90, 90, 0.0001, 7, " °", 48.0)
+        self.init_lon = self._spin(-180, 180, 0.0001, 7, " °", 11.0)
+        self.init_alt = self._spin(-1000, 10000, 1, 2, " m", 0.0)
+        self.init_date = QLineEdit("2026 1 1")
+        for lbl, wdg in (("Init latitude", self.init_lat), ("Init longitude", self.init_lon),
+                         ("Init altitude", self.init_alt), ("Init Y M D", self.init_date)):
+            f.addRow(lbl, wdg)
+        f.addRow(self._apply_btn("Set initial conditions", self._send_init))
+        tabs.addTab(scroll(w), "Sensor")
+
+        # --- GNSS --------------------------------------------------------
+        w, f = page()
+        self.la_spins = [self._spin(-50, 50, 0.01, 3, " m") for _ in range(6)]
+        for lbl, s in zip(("Primary X", "Primary Y", "Primary Z",
+                           "Secondary X", "Secondary Y", "Secondary Z"), self.la_spins):
+            f.addRow(lbl, s)
+        f.addRow(self._apply_btn("Set dual-antenna lever arms", self._send_dual))
+        self.gnss_model = self._combo(GNSS_MODELS)
+        f.addRow("GNSS model", self.gnss_model)
+        f.addRow(self._apply_btn("Set GNSS model", lambda: self.send(f"gnssmodel {self.gnss_model.currentData()}")))
+        self.gr_pos = self._combo(REJECTION, 1)
+        self.gr_vel = self._combo(REJECTION, 1)
+        self.gr_hdt = self._combo(REJECTION, 1)
+        f.addRow("Reject position", self.gr_pos)
+        f.addRow("Reject velocity", self.gr_vel)
+        f.addRow("Reject heading", self.gr_hdt)
+        f.addRow(self._apply_btn("Set GNSS rejection", lambda: self.send(
+            f"gnssreject {self.gr_pos.currentData()} {self.gr_vel.currentData()} {self.gr_hdt.currentData()}")))
+        tabs.addTab(scroll(w), "GNSS")
+
+        # --- MAG / ODO ---------------------------------------------------
+        w, f = page()
+        self.mag_model = self._combo(MAG_MODELS)
+        f.addRow("Mag model", self.mag_model)
+        f.addRow(self._apply_btn("Set mag model", lambda: self.send(f"magmodel {self.mag_model.currentData()}")))
+        self.mag_rej = self._combo(REJECTION, 1)
+        f.addRow("Mag rejection", self.mag_rej)
+        f.addRow(self._apply_btn("Set mag rejection", lambda: self.send(f"magreject {self.mag_rej.currentData()}")))
+        self.odo_gain = self._spin(0, 1e6, 1, 2, " p/m", 1000.0)
+        self.odo_err = self._ispin(0, 100, 1)
+        self.odo_rev = QCheckBox("Reverse mode")
+        f.addRow("Odo gain", self.odo_gain)
+        f.addRow("Odo gain error %", self.odo_err)
+        f.addRow("", self.odo_rev)
+        f.addRow(self._apply_btn("Set odometer config", lambda: self.send(
+            f"odo {self.odo_gain.value():.3f} {self.odo_err.value()} {1 if self.odo_rev.isChecked() else 0}")))
+        self.odo_la = [self._spin(-50, 50, 0.01, 3, " m") for _ in range(3)]
+        for lbl, s in zip(("Odo lever X", "Odo lever Y", "Odo lever Z"), self.odo_la):
+            f.addRow(lbl, s)
+        f.addRow(self._apply_btn("Set odometer lever arm", lambda: self.send(
+            "odolever " + " ".join(f"{s.value():.3f}" for s in self.odo_la))))
+        self.odo_rej = self._combo(REJECTION, 1)
+        f.addRow("Odo rejection", self.odo_rej)
+        f.addRow(self._apply_btn("Set odometer rejection", lambda: self.send(f"odoreject {self.odo_rej.currentData()}")))
+        tabs.addTab(scroll(w), "Mag/Odo")
+
+        # --- SYNC / INTERFACES ------------------------------------------
+        w, f = page()
+        self.si_id = self._ispin(0, 3, 0)
+        self.si_sens = self._combo(SYNC_IN_SENS, 2)
+        self.si_delay = self._ispin(-1000000, 1000000, 0)
+        f.addRow("Sync IN id (0=A..3=D)", self.si_id)
+        f.addRow("Sync IN sensitivity", self.si_sens)
+        f.addRow("Sync IN delay (ns)", self.si_delay)
+        f.addRow(self._apply_btn("Set Sync IN", lambda: self.send(
+            f"syncin {self.si_id.value()} {self.si_sens.currentData()} {self.si_delay.value()}")))
+        self.so_id = self._ispin(0, 1, 0)
+        self.so_func = self._combo(SYNC_OUT_FUNC, 0)
+        self.so_pol = self._combo(SYNC_OUT_POL, 1)
+        self.so_dur = self._ispin(0, 100000000, 100000)
+        f.addRow("Sync OUT id (0=A,1=B)", self.so_id)
+        f.addRow("Sync OUT function", self.so_func)
+        f.addRow("Sync OUT polarity", self.so_pol)
+        f.addRow("Sync OUT pulse (ns)", self.so_dur)
+        f.addRow(self._apply_btn("Set Sync OUT", lambda: self.send(
+            f"syncout {self.so_id.value()} {self.so_func.currentData()} {self.so_pol.currentData()} {self.so_dur.value()}")))
+        self.uart_port = self._combo(UART_PORT, 0)
+        self.uart_baud = self._ispin(4800, 4000000, 921600)
+        self.uart_mode = self._combo(UART_MODE, 1)
+        f.addRow("UART port", self.uart_port)
+        f.addRow("UART baud", self.uart_baud)
+        f.addRow("UART mode", self.uart_mode)
+        f.addRow(self._apply_btn("Set UART", lambda: self.send(
+            f"uart {self.uart_port.currentData()} {self.uart_baud.value()} {self.uart_mode.currentData()}")))
+        self.can_br = self._combo(CAN_BITRATE, 2)
+        self.can_mode = self._combo(CAN_MODE, 0)
+        f.addRow("CAN bitrate", self.can_br)
+        f.addRow("CAN mode", self.can_mode)
+        f.addRow(self._apply_btn("Set CAN", lambda: self.send(
+            f"can {self.can_br.currentData()} {self.can_mode.currentData()}")))
+        tabs.addTab(scroll(w), "Sync/IF")
+
+        # --- OUTPUTS / AIDING -------------------------------------------
+        w, f = page()
+        f.addRow(self._apply_btn("Enable default outputs (PORT_A)", lambda: self.send("outputs")))
+        self.out_port = self._combo(OUTPUT_PORT, 0)
+        self.out_log = self._combo(LOG_IDS, 4)   # EKF_EULER
+        self.out_mode = self._combo(OUTPUT_MODE, 4)  # 25 Hz
+        f.addRow("Output port", self.out_port)
+        f.addRow("Log", self.out_log)
+        f.addRow("Rate", self.out_mode)
+        f.addRow(self._apply_btn("Set single log output", lambda: self.send(
+            f"log {self.out_port.currentData()} 0 {self.out_log.currentData()} {self.out_mode.currentData()}")))
+        self.nmea_port = self._combo(OUTPUT_PORT, 0)
+        self.nmea_id = QLineEdit("GP")
+        f.addRow("NMEA port", self.nmea_port)
+        f.addRow("NMEA talker id", self.nmea_id)
+        f.addRow(self._apply_btn("Set NMEA talker id", lambda: self.send(
+            f"nmeatalker {self.nmea_port.currentData()} {self.nmea_id.text().strip() or 'GP'}")))
+        self.aid_gps = self._combo(PORT_ASSIGN, 4)   # Internal
+        self.aid_sync = self._combo(SYNC_ASSIGN, 0)
+        self.aid_rtcm = self._combo(PORT_ASSIGN, 5)  # Disabled
+        self.aid_air = self._combo(PORT_ASSIGN, 5)
+        self.aid_dvl = self._combo(PORT_ASSIGN, 5)
+        self.aid_odo = self._ispin(0, 255, 255)
+        f.addRow("GNSS port", self.aid_gps)
+        f.addRow("GNSS sync", self.aid_sync)
+        f.addRow("RTCM port", self.aid_rtcm)
+        f.addRow("Air-data port", self.aid_air)
+        f.addRow("DVL port", self.aid_dvl)
+        f.addRow("Odometer pins", self.aid_odo)
+        f.addRow(self._apply_btn("Set aiding assignment", lambda: self.send(
+            f"aiding {self.aid_gps.currentData()} {self.aid_sync.currentData()} {self.aid_rtcm.currentData()} "
+            f"{self.aid_air.currentData()} {self.aid_dvl.currentData()} {self.aid_odo.value()}")))
+        tabs.addTab(scroll(w), "Outputs")
+
+        # --- ADVANCED ----------------------------------------------------
+        w, f = page()
+        self.time_ref = self._combo(TIME_REF, 2)
+        self.gnss_opt = self._ispin(0, 2**31 - 1, 0)
+        self.nmea_opt = self._ispin(0, 2**31 - 1, 0)
+        f.addRow("Time reference", self.time_ref)
+        f.addRow("GNSS options bits", self.gnss_opt)
+        f.addRow("NMEA options bits", self.nmea_opt)
+        f.addRow(self._apply_btn("Set advanced", lambda: self.send(
+            f"advanced {self.time_ref.currentData()} {self.gnss_opt.value()} {self.nmea_opt.value()}")))
+        self.th_pos = self._spin(0, 1000, 0.1, 2, " m", 1.0)
+        self.th_vel = self._spin(0, 1000, 0.1, 2, " m/s", 0.5)
+        self.th_att = self._spin(0, 90, 0.1, 2, " °", 1.0)
+        self.th_hdg = self._spin(0, 180, 0.1, 2, " °", 2.0)
+        for lbl, s in (("Position threshold", self.th_pos), ("Velocity threshold", self.th_vel),
+                       ("Attitude threshold", self.th_att), ("Heading threshold", self.th_hdg)):
+            f.addRow(lbl, s)
+        f.addRow(self._apply_btn("Set validity thresholds", lambda: self.send(
+            f"thresholds {self.th_pos.value():.3f} {self.th_vel.value():.3f} "
+            f"{self.th_att.value():.3f} {self.th_hdg.value():.3f}")))
+        tabs.addTab(scroll(w), "Advanced")
+
+        # --- BACKUP / SETTINGS ------------------------------------------
+        w, f = page()
+        f.addRow(self._apply_btn("Export settings to file…", self._export))
+        f.addRow(self._apply_btn("Import settings from file…", self._import))
+        save_btn = self._apply_btn("SAVE settings + reboot", self._save)
         save_btn.setStyleSheet("background:#2e7d32; font-weight:bold;")
-        save_btn.clicked.connect(self._save)
-        form.addWidget(save_btn)
-
-        restore_btn = QPushButton("Restore factory defaults")
+        f.addRow(save_btn)
+        f.addRow(self._apply_btn("Reboot device", lambda: self.send("reboot")))
+        restore_btn = self._apply_btn("Restore factory defaults", self._restore)
         restore_btn.setStyleSheet("background:#8a3030;")
-        restore_btn.clicked.connect(self._restore)
-        form.addWidget(restore_btn)
+        f.addRow(restore_btn)
+        tabs.addTab(scroll(w), "Backup")
 
-        right.addWidget(cfg)
-        right.addStretch()
-        mid.addLayout(right, 2)
+        return tabs
 
     # ----- bridge process --------------------------------------------------
     def toggle_connect(self):
@@ -444,6 +648,33 @@ class Dashboard(QWidget):
     def _send_dual(self):
         vals = " ".join(f"{s.value():.3f}" for s in self.la_spins)
         self.send(f"dual {vals}")
+
+    def _send_align(self):
+        mis = " ".join(f"{s.value():.3f}" for s in self.mis)
+        la = " ".join(f"{s.value():.3f}" for s in self.imu_la)
+        self.send(f"align {self.ax_x.currentData()} {self.ax_y.currentData()} {mis} {la}")
+
+    def _send_init(self):
+        try:
+            y, m, d = (int(x) for x in self.init_date.text().split())
+        except ValueError:
+            QMessageBox.warning(self, "Init", "Date must be 'YEAR MONTH DAY', e.g. 2026 6 18")
+            return
+        self.send(f"init {self.init_lat.value():.7f} {self.init_lon.value():.7f} "
+                  f"{self.init_alt.value():.3f} {y} {m} {d}")
+
+    def _export(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export settings", "ellipse-d-settings.bin",
+                                              "Settings (*.bin);;All files (*)")
+        if path:
+            self.send(f"export {path}")
+
+    def _import(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import settings", "",
+                                              "Settings (*.bin);;All files (*)")
+        if path and QMessageBox.question(self, "Import",
+                "Import this settings file to the device? It will be applied immediately.") == QMessageBox.Yes:
+            self.send(f"import {path}")
 
     def _save(self):
         if QMessageBox.question(self, "Save", "Save settings to flash and reboot the device?") == QMessageBox.Yes:

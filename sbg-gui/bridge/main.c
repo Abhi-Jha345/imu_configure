@@ -179,19 +179,216 @@ static void emitInfo(SbgEComHandle *h, const char *port, const char *baud)
     }
 }
 
+static void ackr(const char *cmd, SbgErrorCode e)
+{
+    emit("{\"t\":\"ack\",\"cmd\":\"%s\",\"ok\":%s}", cmd, e == SBG_NO_ERROR ? "true" : "false");
+}
+
+static SbgEComCanBitRate canBitRate(int kbit)
+{
+    switch (kbit)
+    {
+    case 10:   return SBG_ECOM_CAN_BITRATE_10;
+    case 20:   return SBG_ECOM_CAN_BITRATE_20;
+    case 25:   return SBG_ECOM_CAN_BITRATE_25;
+    case 50:   return SBG_ECOM_CAN_BITRATE_50;
+    case 100:  return SBG_ECOM_CAN_BITRATE_100;
+    case 125:  return SBG_ECOM_CAN_BITRATE_125;
+    case 250:  return SBG_ECOM_CAN_BITRATE_250;
+    case 500:  return SBG_ECOM_CAN_BITRATE_500;
+    case 750:  return SBG_ECOM_CAN_BITRATE_750;
+    case 1000: return SBG_ECOM_CAN_BITRATE_1000;
+    default:   return SBG_ECOM_CAN_BITRATE_DISABLED;
+    }
+}
+
+static void cmdAlign(SbgEComHandle *h, int axX, int axY, float r, float p, float y, float lx, float ly, float lz)
+{
+    SbgEComSensorAlignmentInfo a;
+    float la[3] = { lx, ly, lz };
+    a.axisDirectionX = (SbgEComAxisDirection)axX;
+    a.axisDirectionY = (SbgEComAxisDirection)axY;
+    a.misRoll  = sbgDegToRadf(r);
+    a.misPitch = sbgDegToRadf(p);
+    a.misYaw   = sbgDegToRadf(y);
+    ackr("align", sbgEComCmdSensorSetAlignmentAndLeverArm(h, &a, la));
+}
+
+static void cmdInit(SbgEComHandle *h, double lat, double lon, double alt, int yr, int mo, int dy)
+{
+    SbgEComInitConditionConf c;
+    c.latitude = lat; c.longitude = lon; c.altitude = alt;
+    c.year = (uint16_t)yr; c.month = (uint8_t)mo; c.day = (uint8_t)dy;
+    ackr("init", sbgEComCmdSensorSetInitCondition(h, &c));
+}
+
+static void cmdGnssModel(SbgEComHandle *h, int id)   { ackr("gnssmodel", sbgEComCmdGnss1SetModelId(h, (SbgEComGnssModelsStdIds)id)); }
+static void cmdMagModel(SbgEComHandle *h, int id)    { ackr("magmodel",  sbgEComCmdMagSetModelId(h, (SbgEComMagModelsStdId)id)); }
+
+static void cmdGnssReject(SbgEComHandle *h, int pos, int vel, int hdt)
+{
+    SbgEComGnssRejectionConf r;
+    r.position = (SbgEComRejectionMode)pos;
+    r.velocity = (SbgEComRejectionMode)vel;
+    r.hdt      = (SbgEComRejectionMode)hdt;
+    ackr("gnssreject", sbgEComCmdGnss1SetRejection(h, &r));
+}
+
+static void cmdMagReject(SbgEComHandle *h, int mode)
+{
+    SbgEComMagRejectionConf r;
+    r.magneticField = (SbgEComRejectionMode)mode;
+    ackr("magreject", sbgEComCmdMagSetRejection(h, &r));
+}
+
+static void cmdOdo(SbgEComHandle *h, float gain, int gainErr, int reverse)
+{
+    SbgEComOdoConf c;
+    c.gain = gain;
+    c.gainError = (uint8_t)gainErr;
+    c.reverseMode = reverse ? true : false;
+    ackr("odo", sbgEComCmdOdoSetConf(h, &c));
+}
+static void cmdOdoLever(SbgEComHandle *h, float x, float y, float z) { float la[3]={x,y,z}; ackr("odolever", sbgEComCmdOdoSetLeverArm(h, la)); }
+static void cmdOdoReject(SbgEComHandle *h, int mode)
+{
+    SbgEComOdoRejectionConf r;
+    r.velocity = (SbgEComRejectionMode)mode;
+    ackr("odoreject", sbgEComCmdOdoSetRejection(h, &r));
+}
+
+static void cmdSyncIn(SbgEComHandle *h, int id, int sens, int delay)
+{
+    SbgEComSyncInConf c;
+    c.sensitivity = (SbgEComSyncInSensitivity)sens;
+    c.delay = delay;
+    ackr("syncin", sbgEComCmdSyncInSetConf(h, (SbgEComSyncInId)id, &c));
+}
+static void cmdSyncOut(SbgEComHandle *h, int id, int func, int pol, int dur)
+{
+    SbgEComSyncOutConf c;
+    c.outputFunction = (SbgEComSyncOutFunction)func;
+    c.polarity = (SbgEComSyncOutPolarity)pol;
+    c.duration = (uint32_t)dur;
+    ackr("syncout", sbgEComCmdSyncOutSetConf(h, (SbgEComSyncOutId)id, &c));
+}
+
+static void cmdUart(SbgEComHandle *h, int portId, int baud, int mode)
+{
+    SbgEComInterfaceConf c;
+    c.baudRate = (uint32_t)baud;
+    c.mode = (SbgEComPortMode)mode;
+    ackr("uart", sbgEComCmdInterfaceSetUartConf(h, (SbgEComPortId)portId, &c));
+}
+static void cmdCan(SbgEComHandle *h, int kbit, int mode)
+{
+    ackr("can", sbgEComCmdInterfaceSetCanConf(h, canBitRate(kbit), (SbgEComCanMode)mode));
+}
+
+static void cmdAdvanced(SbgEComHandle *h, int timeRef, unsigned gnssOpt, unsigned nmeaOpt)
+{
+    SbgEComAdvancedConf c;
+    c.timeReference = (SbgEComTimeReferenceSrc)timeRef;
+    c.gnssOptions = gnssOpt;
+    c.nmeaOptions = nmeaOpt;
+    ackr("advanced", sbgEComCmdAdvancedSetConf(h, &c));
+}
+static void cmdThresholds(SbgEComHandle *h, float pos, float vel, float att, float head)
+{
+    SbgEComValidityThresholds t;
+    t.positionThreshold = pos;
+    t.velocityThreshold = vel;
+    t.attitudeThreshold = sbgDegToRadf(att);
+    t.headingThreshold  = sbgDegToRadf(head);
+    ackr("thresholds", sbgEComCmdAdvancedSetThresholds(h, &t));
+}
+
+static void cmdAiding(SbgEComHandle *h, int gps1Port, int gps1Sync, int rtcm, int airData, int dvl, int odoPins)
+{
+    SbgEComAidingAssignConf a;
+    if (sbgEComCmdSensorGetAidingAssignment(h, &a) != SBG_NO_ERROR) { ackr("aiding", SBG_ERROR); return; }
+    a.gps1Port         = (SbgEComModulePortAssignment)gps1Port;
+    a.gps1Sync         = (SbgEComModuleSyncAssignment)gps1Sync;
+    a.rtcmPort         = (SbgEComModulePortAssignment)rtcm;
+    a.airDataPort      = (SbgEComModulePortAssignment)airData;
+    a.dvlPort          = (SbgEComModulePortAssignment)dvl;
+    a.odometerPinsConf = (SbgEComOdometerPinAssignment)odoPins;
+    ackr("aiding", sbgEComCmdSensorSetAidingAssignment(h, &a));
+}
+
+static void cmdNmeaTalker(SbgEComHandle *h, int port, const char *id)
+{
+    ackr("nmeatalker", sbgEComCmdOutputSetNmeaTalkerId(h, (SbgEComOutputPort)port, id));
+}
+static void cmdClassEnable(SbgEComHandle *h, int port, int cls, int en)
+{
+    ackr("classenable", sbgEComCmdOutputClassSetEnable(h, (SbgEComOutputPort)port, (SbgEComClass)cls, en ? true : false));
+}
+static void cmdLog(SbgEComHandle *h, int port, int cls, int msg, int mode)
+{
+    ackr("log", sbgEComCmdOutputSetConf(h, (SbgEComOutputPort)port, (SbgEComClass)cls, (SbgEComMsgId)msg, (SbgEComOutputMode)mode));
+}
+
+static void cmdExport(SbgEComHandle *h, const char *path)
+{
+    static uint8_t buf[32768];
+    size_t size = 0;
+    SbgErrorCode e = sbgEComCmdExportSettings(h, buf, &size, sizeof(buf));
+    if (e == SBG_NO_ERROR)
+    {
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite(buf, 1, size, f); fclose(f); }
+        else   { e = SBG_ERROR; }
+    }
+    emit("{\"t\":\"ack\",\"cmd\":\"export\",\"ok\":%s,\"bytes\":%zu}", e == SBG_NO_ERROR ? "true" : "false", size);
+}
+static void cmdImport(SbgEComHandle *h, const char *path)
+{
+    static uint8_t buf[32768];
+    FILE *f = fopen(path, "rb");
+    if (!f) { ackr("import", SBG_ERROR); return; }
+    size_t size = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    ackr("import", sbgEComCmdImportSettings(h, buf, size));
+}
+
 static void handleCommand(SbgEComHandle *h, char *line, const char *port, const char *baud)
 {
-    int   id;
-    float px, py, pz, sx, sy, sz;
+    int   i1, i2, i3, i4, i5, i6;
+    float f1, f2, f3, f4, f5, f6, f7, f8;
+    double d1, d2, d3;
+    unsigned u1, u2;
+    char    str[64];
 
-    if      (strncmp(line, "outputs", 7) == 0)              { enableDefaultOutputs(h); }
-    else if (sscanf(line, "motion %d", &id) == 1)           { setMotion(h, id); }
-    else if (sscanf(line, "dual %f %f %f %f %f %f",
-                    &px, &py, &pz, &sx, &sy, &sz) == 6)      { setDual(h, px, py, pz, sx, sy, sz); }
-    else if (strncmp(line, "save", 4) == 0)                 { settingsAction(h, SBG_ECOM_SAVE_SETTINGS, "save"); }
-    else if (strncmp(line, "restore", 7) == 0)              { settingsAction(h, SBG_ECOM_RESTORE_DEFAULT_SETTINGS, "restore"); }
-    else if (strncmp(line, "info", 4) == 0)                 { emitInfo(h, port, baud); }
-    else if (line[0] != '\0')                               { emit("{\"t\":\"ack\",\"cmd\":\"unknown\",\"ok\":false}"); }
+    if      (strncmp(line, "outputs", 7) == 0)                              { enableDefaultOutputs(h); }
+    else if (sscanf(line, "motion %d", &i1) == 1)                           { setMotion(h, i1); }
+    else if (sscanf(line, "dual %f %f %f %f %f %f", &f1,&f2,&f3,&f4,&f5,&f6) == 6) { setDual(h, f1,f2,f3,f4,f5,f6); }
+    else if (sscanf(line, "align %d %d %f %f %f %f %f %f", &i1,&i2,&f1,&f2,&f3,&f4,&f5,&f6) == 8) { cmdAlign(h,i1,i2,f1,f2,f3,f4,f5,f6); }
+    else if (sscanf(line, "init %lf %lf %lf %d %d %d", &d1,&d2,&d3,&i1,&i2,&i3) == 6) { cmdInit(h,d1,d2,d3,i1,i2,i3); }
+    else if (sscanf(line, "gnssmodel %d", &i1) == 1)                        { cmdGnssModel(h, i1); }
+    else if (sscanf(line, "gnssreject %d %d %d", &i1,&i2,&i3) == 3)         { cmdGnssReject(h, i1,i2,i3); }
+    else if (sscanf(line, "magmodel %d", &i1) == 1)                         { cmdMagModel(h, i1); }
+    else if (sscanf(line, "magreject %d", &i1) == 1)                        { cmdMagReject(h, i1); }
+    else if (sscanf(line, "odo %f %d %d", &f1,&i1,&i2) == 3)                { cmdOdo(h, f1, i1, i2); }
+    else if (sscanf(line, "odolever %f %f %f", &f1,&f2,&f3) == 3)           { cmdOdoLever(h, f1,f2,f3); }
+    else if (sscanf(line, "odoreject %d", &i1) == 1)                        { cmdOdoReject(h, i1); }
+    else if (sscanf(line, "syncin %d %d %d", &i1,&i2,&i3) == 3)             { cmdSyncIn(h, i1,i2,i3); }
+    else if (sscanf(line, "syncout %d %d %d %d", &i1,&i2,&i3,&i4) == 4)     { cmdSyncOut(h, i1,i2,i3,i4); }
+    else if (sscanf(line, "uart %d %d %d", &i1,&i2,&i3) == 3)               { cmdUart(h, i1,i2,i3); }
+    else if (sscanf(line, "can %d %d", &i1,&i2) == 2)                       { cmdCan(h, i1, i2); }
+    else if (sscanf(line, "advanced %d %u %u", &i1,&u1,&u2) == 3)           { cmdAdvanced(h, i1, u1, u2); }
+    else if (sscanf(line, "thresholds %f %f %f %f", &f1,&f2,&f3,&f4) == 4)  { cmdThresholds(h, f1,f2,f3,f4); }
+    else if (sscanf(line, "aiding %d %d %d %d %d %d", &i1,&i2,&i3,&i4,&i5,&i6) == 6) { cmdAiding(h, i1,i2,i3,i4,i5,i6); }
+    else if (sscanf(line, "nmeatalker %d %63s", &i1, str) == 2)             { cmdNmeaTalker(h, i1, str); }
+    else if (sscanf(line, "classenable %d %d %d", &i1,&i2,&i3) == 3)        { cmdClassEnable(h, i1,i2,i3); }
+    else if (sscanf(line, "log %d %d %d %d", &i1,&i2,&i3,&i4) == 4)         { cmdLog(h, i1,i2,i3,i4); }
+    else if (sscanf(line, "export %63s", str) == 1)                        { cmdExport(h, str); }
+    else if (sscanf(line, "import %63s", str) == 1)                        { cmdImport(h, str); }
+    else if (strncmp(line, "save", 4) == 0)                                 { settingsAction(h, SBG_ECOM_SAVE_SETTINGS, "save"); }
+    else if (strncmp(line, "restore", 7) == 0)                              { settingsAction(h, SBG_ECOM_RESTORE_DEFAULT_SETTINGS, "restore"); }
+    else if (strncmp(line, "reboot", 6) == 0)                               { settingsAction(h, SBG_ECOM_REBOOT_ONLY, "reboot"); }
+    else if (strncmp(line, "info", 4) == 0)                                 { emitInfo(h, port, baud); }
+    else if (line[0] != '\0')                                               { emit("{\"t\":\"ack\",\"cmd\":\"unknown\",\"ok\":false}"); }
 }
 
 //----------------------------------------------------------------------//
