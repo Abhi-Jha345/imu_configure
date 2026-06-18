@@ -26,9 +26,10 @@ which keeps all binary-protocol parsing inside the proven C library.
 
 ### Common
 - An SBG **Ellipse-D** connected via its USB-serial cable (FTDI FT232 chip).
-- The [sbgECom](https://github.com/SBG-Systems/sbgECom) library installed
-  (instructions below).
 - CMake ≥ 3.16 and a C/C++ compiler.
+- **⚠️ The [sbgECom](https://github.com/SBG-Systems/sbgECom) C library installed —
+  this is a hard requirement. Nothing here builds without it. See
+  [section 2](#2-install-the-sbgecom-library--required--do-this-first) and do it before step 3.**
 
 ### Ubuntu / Linux
 ```bash
@@ -50,36 +51,91 @@ pip3 install --user PySide6        # or: sudo apt install python3-pyside6 (if pa
 
 ---
 
-## 2. Install the sbgECom library
+## 2. Install the sbgECom library  ⚠️ REQUIRED — DO THIS FIRST
 
-Both platforms build sbgECom with CMake and install it so these tools can
-`find_package(sbgECom)`.
+> **This step is mandatory.** Every tool in this repo links against the sbgECom C
+> library and resolves it at build time via `find_package(sbgECom)`. This repo
+> does **not** bundle sbgECom — if the library is not installed, `cmake`/`build.sh`
+> will fail with `Could not find a package configuration file provided by "sbgECom"`.
+> You must install it **once** before building anything here.
+
+The library is open source (MIT) and maintained by SBG Systems. You build it from
+source with CMake and install it to a prefix so this repo can find it.
 
 ### Ubuntu / Linux
+
+**Step 2.1 — Clone the official library** (into any folder, e.g. your home dir):
 ```bash
+cd ~
 git clone https://github.com/SBG-Systems/sbgECom.git
 cd sbgECom
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-sudo cmake --install build              # installs to /usr/local
 ```
-> No sudo? Install to your home prefix instead and point CMake at it later:
-> `cmake --install build --prefix ~/.local`
-> then build the tools with `-DCMAKE_PREFIX_PATH=$HOME/.local`.
+
+**Step 2.2 — Configure the build** (Release = optimized):
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
+**Step 2.3 — Compile the library:**
+```bash
+cmake --build build -j
+```
+
+**Step 2.4 — Install it system-wide** (to `/usr/local`, needs sudo):
+```bash
+sudo cmake --install build
+```
+This copies `libsbgECom.a` → `/usr/local/lib`, headers → `/usr/local/include`,
+and the CMake package → `/usr/local/lib/cmake/sbgECom` (what `find_package` reads).
+
+**Step 2.5 — Verify the install** (all three must exist):
+```bash
+ls /usr/local/lib/libsbgECom.a
+ls /usr/local/include/sbgECom.h
+ls /usr/local/lib/cmake/sbgECom/
+```
+If all three are present, the library is installed correctly and you can build the
+tools in step 3.
+
+> **No sudo / can't write to /usr/local?** Install into your home prefix instead:
+> ```bash
+> cmake --install build --prefix ~/.local
+> ```
+> Then in step 3 build the tools with `-DCMAKE_PREFIX_PATH=$HOME/.local`, e.g.
+> `./build.sh -DCMAKE_PREFIX_PATH=$HOME/.local`.
 
 ### Windows (PowerShell, Visual Studio toolchain)
+
+**Step 2.1 — Clone:**
 ```powershell
 git clone https://github.com/SBG-Systems/sbgECom.git
 cd sbgECom
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-cmake --install build --prefix "C:/sbgECom"     # choose an install prefix
 ```
-When building the tools, pass `-DCMAKE_PREFIX_PATH=C:/sbgECom`.
+**Step 2.2 — Configure:**
+```powershell
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+**Step 2.3 — Compile:**
+```powershell
+cmake --build build --config Release
+```
+**Step 2.4 — Install to a chosen prefix** (no system-wide default on Windows):
+```powershell
+cmake --install build --prefix "C:/sbgECom"
+```
+**Step 2.5 — Verify** — confirm `C:/sbgECom/lib/cmake/sbgECom/` exists.
+
+> On Windows there is no standard search path, so you **must** tell the tools where
+> you installed it by passing `-DCMAKE_PREFIX_PATH=C:/sbgECom` in step 3.
 
 ---
 
 ## 3. Build these tools
+
+> Make sure **section 2 is done** (sbgECom installed and verified). If the build
+> reports `Could not find a package configuration file provided by "sbgECom"`,
+> go back to section 2 — the library is not installed (or, on Windows / a custom
+> prefix, you forgot `-DCMAKE_PREFIX_PATH=...`).
 
 ### Ubuntu / Linux
 ```bash
